@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Teleop Dashboard</title>
+<style>
+  /* Neobotics tokens, same scheme as the other lab dashboards. */
+  :root { --white: #FFFFFF; --halo: #F5F5F7; --steel: #E2E2E2; --carbon: #1D1D27; --tarmac: #1B2036; --red: #FF0033; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; background: var(--white); color: var(--carbon); }
+  .topbar { background: var(--tarmac); color: var(--halo); padding: 0.8rem 1.5rem; display: flex; justify-content: space-between; align-items: center; }
+  .topbar button { background: transparent; border: 1px solid rgba(245, 245, 247, 0.5); color: var(--halo); font-family: inherit; padding: 0.4rem 1rem; border-radius: 6px; cursor: pointer; margin: 0 0 0 0.5rem; }
+  .topbar button:hover { background: rgba(245, 245, 247, 0.15); }
+  .topbar button.stop { border-color: var(--red); color: var(--red); font-weight: bold; }
+  .topbar button.stop:hover { background: var(--red); color: var(--white); }
+  .topbar h1 { font-family: 'Space Grotesk', 'Helvetica Neue', sans-serif; font-size: 1.3rem; }
+  .meta { color: rgba(245, 245, 247, 0.72); font-size: 0.85rem; margin-top: 0.2rem; }
+  .meta b { color: var(--white); }
+  main { padding: 1rem 1.5rem; }
+  /* 592 = 560 + the card's 1rem padding either side, so a view inside one of
+     these columns lands at exactly 560 px, the width the sibling dashboards
+     cap their camera at. Row 1: camera, lidar, then the encoder chart over
+     the rest of the width. Row 2: the drive pad and the tune sliders. */
+  .grid { display: grid; grid-template-columns: 592px 592px 1fr; gap: 1rem; }
+  @media (max-width: 1400px) { .grid { grid-template-columns: 1fr; } }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  @media (max-width: 900px) { .row2 { grid-template-columns: 1fr; } }
+  .card { background: var(--white); border: 1px solid var(--steel); border-radius: 12px; padding: 1rem; margin-bottom: 1rem; box-shadow: 0 6px 18px rgba(29, 29, 39, 0.08); }
+  .card h2 { font-family: 'Space Grotesk', 'Helvetica Neue', sans-serif; font-size: 1rem; color: var(--tarmac); margin-bottom: 0.5rem; }
+  .view { background: var(--tarmac); border-radius: 6px; width: 100%; max-width: 560px; height: auto; display: block; aspect-ratio: 4 / 3; object-fit: contain; }
+  canvas { background: var(--tarmac); border-radius: 6px; width: 100%; max-width: 560px; height: auto; display: block; }
+  canvas.wide { max-width: 100%; }
+  label { display: block; color: rgba(29, 29, 39, 0.6); font-size: 0.8rem; margin-top: 0.6rem; }
+  label b { color: var(--carbon); }
+  input[type=range] { width: 100%; accent-color: var(--red); border: none; padding: 0; }
+  button, select { background: var(--white); border: 1px solid var(--tarmac); color: var(--tarmac); font-family: inherit; padding: 0.35rem 0.8rem; border-radius: 6px; margin: 0.8rem 0.4rem 0 0; cursor: pointer; }
+  button:hover { background: var(--steel); }
+  .readout { font-size: 0.85rem; margin-top: 0.5rem; white-space: pre-line; }
+  /* What the car is doing, readable from across the room. */
+  .state { font-family: 'Space Grotesk', 'Helvetica Neue', sans-serif; font-size: 1.35rem;
+           color: var(--white); background: var(--tarmac); border-radius: 8px;
+           padding: 1.1rem 0.6rem; text-align: center; letter-spacing: 0.02em; }
+  .state.moving { background: var(--red); }
+  .state.timeout { background: #B8860B; }
+  /* The drive pad: a 3x3 grid with the four arrows. Buttons latch while a
+     pointer or a key holds them; two at once is normal (forward and left). */
+  .pad { display: grid; grid-template-columns: repeat(3, 84px); grid-template-rows: repeat(3, 84px); gap: 8px; justify-content: center; margin: 0.8rem auto; touch-action: none; user-select: none; }
+  .pad button { margin: 0; font-size: 1.8rem; border-radius: 12px; border: 2px solid var(--tarmac); background: var(--white); color: var(--tarmac); cursor: pointer; touch-action: none; }
+  .pad button.down { background: var(--red); border-color: var(--red); color: var(--white); }
+  .pad button:focus { outline: none; }
+  .pad .key { display: block; font-size: 0.65rem; letter-spacing: 0.05em; color: inherit; opacity: 0.7; }
+  .pad .mid { background: var(--halo); border: 1px solid var(--steel); border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; color: rgba(29, 29, 39, 0.5); text-align: center; }
+</style>
+</head>
+<body>
+
+<div class="topbar">
+<div>
+<h1>Web Teleop Dashboard</h1>
+<div class="meta">throttle: <b id="thr">?</b> &bull; steer: <b id="steer">?</b> &bull; odom: <b id="enc">?</b> m/s
+  &bull; camera: <b id="fps">?</b> fps &bull; frame: <b id="res">?</b></div>
+</div>
+<div>
+<button class="stop" onclick="stopCar()" title="Release every button and set speed to 0">STOP</button>
+<button onclick="reset()" title="Re-read teleop.yaml">Reset</button>
+</div>
+</div>
+<main>
+<div class="grid">
+  <div class="card">
+    <h2>Camera</h2>
+    <img id="color" class="view" alt="camera view" title="Live camera">
+  </div>
+  <div class="card">
+    <h2>Lidar</h2>
+    <canvas id="lidar" width="420" height="420" title="Scan points around the car; the nose is up. Scroll to zoom."></canvas>
+  </div>
+  <div class="card">
+    <h2>Encoder</h2>
+    <div class="state" id="state"></div>
+    <canvas id="chart" class="wide" width="420" height="160" title="White: measured speed from the wheel encoder, m/s. Red: the throttle being commanded, -1 to 1. Yellow lines: slider changes."></canvas>
+  </div>
+</div>
+
+<div class="row2">
+  <div class="card">
+    <h2>Drive</h2>
+    <div class="pad" id="pad">
+      <div></div>
+      <button data-axis="fwd" data-val="1" title="Forward: W or the up arrow">&#9650;<span class="key">W</span></button>
+      <div></div>
+      <button data-axis="turn" data-val="-1" title="Left: A or the left arrow">&#9664;<span class="key">A</span></button>
+      <div class="mid" title="Hold two at once to turn while moving. Keys work anywhere on the page.">WASD<br>or arrows</div>
+      <button data-axis="turn" data-val="1" title="Right: D or the right arrow">&#9654;<span class="key">D</span></button>
+      <div></div>
+      <button data-axis="fwd" data-val="-1" title="Back: S or the down arrow">&#9660;<span class="key">S</span></button>
+      <div></div>
+    </div>
+  </div>
+  <div class="card">
+    <h2>Tune</h2>
+    <div id="tuneform"></div>
+    <button onclick="post('/save')">Save</button>
+    <button onclick="reset()">Load</button>
+  </div>
+</div>
+
+<div class="card">
+  <h2>Logs</h2>
+  <button onclick="saveLog()">Save log</button>
+  <select id="logsel"></select>
+  <button onclick="loadLog()">Load log</button>
+  <span class="readout" id="loginfo"></span>
+  <canvas id="logchart" class="wide" width="900" height="160"></canvas>
+</div>
+
+<script>
+const SLIDERS = [
+  { key: 'speed', tip: '0 to 1 throttle while forward or back is held', min: 0, max: 1, step: 0.01 },
+  { key: 'angle', tip: '0 to 1 steering while left or right is held; 1 is full lock', min: 0, max: 1, step: 0.01 },
+];
+const KEYS = {
+  KeyW: ['fwd', 1], ArrowUp: ['fwd', 1], KeyS: ['fwd', -1], ArrowDown: ['fwd', -1],
+  KeyA: ['turn', -1], ArrowLeft: ['turn', -1], KeyD: ['turn', 1], ArrowRight: ['turn', 1],
+};
+
+let last = null;
+
+function post(path, body) {
+  return fetch(path, { method: 'POST', body: body ? JSON.stringify(body) : null });
+}
+
+// ---- the command: whatever is held right now, from any source ----
+// held: set of "axis:val" strings. Two on different axes give a diagonal;
+// two on the same axis cancel to 0, which is what a car should do when
+// asked for both forward and back.
+const held = new Set();
+
+function command() {
+  const sum = axis => [...held].filter(h => h.startsWith(axis + ':')).reduce((a, h) => a + parseInt(h.split(':')[1]), 0);
+  return { fwd: Math.sign(sum('fwd')), turn: Math.sign(sum('turn')) };
+}
+
+let lastSent = '';
+function sendCmd(force) {
+  const c = command(), s = JSON.stringify(c);
+  if (s !== lastSent || force) { lastSent = s; post('/cmd', c); }
+  for (const b of document.querySelectorAll('#pad button')) {
+    b.classList.toggle('down', held.has(`${b.dataset.axis}:${b.dataset.val}`));
+  }
+}
+
+function press(axis, val) { held.add(`${axis}:${val}`); sendCmd(false); }
+function release(axis, val) { held.delete(`${axis}:${val}`); sendCmd(false); }
+function releaseAll() { held.clear(); sendCmd(true); }
+
+// The service drops a command older than cmd_timeout, so repeat it while
+// anything is held. Sending nothing while released is what lets the
+// timeout catch a page that vanished with a key down.
+setInterval(() => { if (held.size) sendCmd(true); }, 100);
+
+// Keyboard. Auto-repeat keydown events are ignored so a held key does not
+// flood; keyup releases. Typing in a field is not driving.
+document.addEventListener('keydown', e => {
+  if (e.repeat || !(e.code in KEYS) || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  e.preventDefault();
+  press(...KEYS[e.code]);
+});
+document.addEventListener('keyup', e => {
+  if (!(e.code in KEYS)) return;
+  e.preventDefault();
+  release(...KEYS[e.code]);
+});
+// A page that loses focus loses its keyup events too. Treat that as
+// releasing everything rather than waiting for the timeout.
+window.addEventListener('blur', releaseAll);
+document.addEventListener('visibilitychange', () => { if (document.hidden) releaseAll(); });
+
+// Pointer and touch. Each pointer is its own press, so two fingers on two
+// buttons are two holds; a pointer that leaves its button releases it.
+for (const b of document.querySelectorAll('#pad button')) {
+  const axis = b.dataset.axis, val = parseInt(b.dataset.val);
+  b.addEventListener('pointerdown', e => { e.preventDefault(); b.setPointerCapture(e.pointerId); press(axis, val); });
+  for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+    b.addEventListener(ev, () => release(axis, val));
+  }
+  b.addEventListener('contextmenu', e => e.preventDefault());
+}
+
+function stopCar() {
+  releaseAll();
+  post('/params', { speed: 0 }).then(() => { document.getElementById('tuneform').dataset.built = ''; });
+}
+
+function reset() {
+  post('/load').then(() => { document.getElementById('tuneform').dataset.built = ''; });
+}
+
+// ---- tune sliders: name only, the explanation on hover ----
+const SEND_MS = 60;
+let pending = {}, sendTimer = null;
+function queue(key, value) {
+  pending[key] = value;
+  if (sendTimer) return;
+  sendTimer = setTimeout(() => {
+    const body = pending; pending = {}; sendTimer = null;
+    post('/params', body);
+  }, SEND_MS);
+}
+
+function buildForm(p) {
+  // Rebuild only on Reset/Load/Stop so a drag is not interrupted by polling.
+  const form = document.getElementById('tuneform');
+  if (form.dataset.built) return;
+  form.dataset.built = '1';
+  form.innerHTML = SLIDERS.map(s => `
+    <label title="${s.tip}">${s.key} <b id="val_${s.key}">${p[s.key]}</b>
+      <input id="in_${s.key}" type="range" min="${s.min}" max="${s.max}" step="${s.step}" value="${p[s.key]}"></label>`).join('');
+  for (const s of SLIDERS) {
+    document.getElementById(`in_${s.key}`).oninput = e => {
+      document.getElementById(`val_${s.key}`).textContent = e.target.value;
+      queue(s.key, parseFloat(e.target.value));
+    };
+  }
+}
+
+function syncForm(p) {
+  if (document.querySelector('input:active')) return;
+  for (const s of SLIDERS) {
+    const el = document.getElementById(`in_${s.key}`);
+    if (el && parseFloat(el.value) !== p[s.key]) {
+      el.value = p[s.key];
+      document.getElementById(`val_${s.key}`).textContent = p[s.key];
+    }
+  }
+}
+
+// ---- views ----
+// Pull frames one at a time so a congested link drops frame rate instead
+// of building a lag queue. Pauses when the tab is hidden.
+(function liveLoop() {
+  const img = document.getElementById('color');
+  (function tick() {
+    if (document.hidden) { setTimeout(tick, 250); return; }
+    const t = Date.now();
+    const done = () => {
+      img.removeEventListener('load', done); img.removeEventListener('error', done);
+      setTimeout(tick, Math.max(20, 120 - (Date.now() - t)));
+    };
+    img.addEventListener('load', done); img.addEventListener('error', done);
+    img.src = `/frame?${t}`;
+  })();
+})();
+
+let VIEW = 4.0;  // lidar view radius in meters, scroll wheel to zoom
+
+function drawLidar(scan) {
+  const c = document.getElementById('lidar'), x = c.getContext('2d');
+  const cx = c.width / 2, cy = c.height / 2, scale = cx / VIEW;
+  x.clearRect(0, 0, c.width, c.height);
+  // 0 deg is the nose (up). Positive degrees are to the right.
+  x.fillStyle = '#F5F5F7';
+  for (const [deg, r] of scan) {
+    const a = deg * Math.PI / 180;
+    x.fillRect(cx + Math.sin(a) * r * scale - 1, cy - Math.cos(a) * r * scale - 1, 2, 2);
+  }
+  x.strokeStyle = 'rgba(245, 245, 247, 0.25)';
+  for (const m of [1, 2, 3]) {
+    if (m >= VIEW) break;
+    x.beginPath(); x.arc(cx, cy, m * scale, 0, 2 * Math.PI); x.stroke();
+  }
+  x.fillStyle = '#FF0033';
+  x.fillRect(cx - 4, cy - 7, 8, 14);  // the car
+  x.fillStyle = 'rgba(245, 245, 247, 0.72)'; x.font = '11px Helvetica';
+  x.fillText(`view ${VIEW.toFixed(1)} m`, 6, c.height - 6);
+}
+
+document.getElementById('lidar').addEventListener('wheel', e => {
+  e.preventDefault();
+  VIEW = Math.min(12, Math.max(1, VIEW * (e.deltaY > 0 ? 1.2 : 1 / 1.2)));
+});
+
+function drawSeries(canvasId, series, labels, marks) {
+  // series: list of {pts: [[t, v]], color, fixed?}. Each scaled to its own
+  // max unless fixed. marks: [[t, label]] slider changes, yellow lines.
+  const cv = document.getElementById(canvasId), x = cv.getContext('2d');
+  x.clearRect(0, 0, cv.width, cv.height);
+  x.strokeStyle = 'rgba(245, 245, 247, 0.48)'; x.setLineDash([4, 4]);
+  x.beginPath(); x.moveTo(0, cv.height / 2); x.lineTo(cv.width, cv.height / 2); x.stroke();
+  x.setLineDash([]);
+  for (const s of series) {
+    if (s.pts.length < 2) continue;
+    const t0 = s.pts[0][0], t1 = s.pts[s.pts.length - 1][0];
+    const max = s.fixed || Math.max(0.2, ...s.pts.map(p => Math.abs(p[1])));
+    x.strokeStyle = s.color; x.lineWidth = 1.5; x.beginPath();
+    for (let i = 0; i < s.pts.length; i++) {
+      const px = (s.pts[i][0] - t0) / (t1 - t0 || 1) * cv.width;
+      const py = cv.height / 2 - s.pts[i][1] / max * (cv.height / 2 - 8);
+      i ? x.lineTo(px, py) : x.moveTo(px, py);
+    }
+    x.stroke();
+    s.max = max;
+  }
+  const m0 = series[0];
+  if (marks && m0 && m0.pts.length > 1) {
+    const t0 = m0.pts[0][0], t1 = m0.pts[m0.pts.length - 1][0];
+    x.save();
+    for (const [t, label] of marks) {
+      if (t < t0 || t > t1) continue;
+      const px = (t - t0) / (t1 - t0 || 1) * cv.width;
+      x.strokeStyle = '#FFD700'; x.lineWidth = 1.5;
+      x.shadowColor = '#FFD700'; x.shadowBlur = 8;
+      x.setLineDash([6, 4]);
+      x.beginPath(); x.moveTo(px, 18); x.lineTo(px, cv.height); x.stroke();
+      x.setLineDash([]);
+      x.fillStyle = '#FFD700'; x.font = '11px Helvetica';
+      x.fillText(label, Math.min(px + 4, cv.width - x.measureText(label).width - 4), 30);
+    }
+    x.restore();
+  }
+  // Axis values from the first series: y ticks at +max / 0 / -max, x in seconds.
+  const s0 = series[0];
+  if (s0 && s0.pts.length > 1) {
+    const u = s0.unit || '';
+    const t0 = s0.pts[0][0], t1 = s0.pts[s0.pts.length - 1][0];
+    x.fillStyle = 'rgba(245, 245, 247, 0.72)'; x.font = '11px Helvetica';
+    x.fillText(`+${s0.max.toFixed(2)} ${u}`, 4, 28);
+    x.fillText(`0 ${u}`, 4, cv.height / 2 - 4);
+    x.fillText(`-${s0.max.toFixed(2)} ${u}`, 4, cv.height - 22);
+    x.fillText(`${t0.toFixed(1)} s`, 4, cv.height - 8);
+    const end = `${t1.toFixed(1)} s`;
+    x.fillText(end, cv.width - x.measureText(end).width - 4, cv.height - 8);
+  }
+  x.fillStyle = '#F5F5F7'; x.font = '12px Helvetica';
+  x.fillText(labels(series), 8, 14);
+}
+
+const WORDS = { '1': 'FORWARD', '-1': 'BACK' }, TURNS = { '1': 'RIGHT', '-1': 'LEFT' };
+
+let busy = false;
+function update() {
+  if (busy) return;  // do not stack requests if the network lags
+  busy = true;
+  fetch('/state').then(r => r.json()).then(d => {
+    busy = false;
+    last = d;
+    document.getElementById('thr').textContent = d.speed_cmd;
+    document.getElementById('steer').textContent = d.steer;
+    document.getElementById('enc').textContent = d.enc_speed;
+    document.getElementById('fps').textContent = d.cam_fps;
+    document.getElementById('res').textContent = d.res[0] ? `${d.res[0]}x${d.res[1]}` : 'none';
+
+    const box = document.getElementById('state');
+    const words = [WORDS[d.fwd], TURNS[d.turn]].filter(Boolean).join(' ');
+    box.textContent = d.timed_out ? 'TIMED OUT' : (words || 'STOPPED');
+    box.className = 'state' + (d.timed_out ? ' timeout' : (words ? ' moving' : ''));
+    box.title = d.timed_out
+      ? `No command reached the service for ${d.params.cmd_timeout} s; driving zero until a button or key is pressed again.`
+      : d.params.speed === 0 ? 'speed is 0: the buttons steer but the car will not move until the slider is raised.'
+      : `Throttle ${d.speed_cmd}, steer ${d.steer}; measured ${d.enc_speed} m/s.`;
+
+    buildForm(d.params);
+    syncForm(d.params);
+    drawLidar(d.scan);
+    drawSeries('chart', [
+      { pts: d.hist.map(r => [r[0], r[1]]), color: '#FFFFFF', unit: 'm/s' },
+      { pts: d.hist.map(r => [r[0], r[2]]), color: '#FF0033', fixed: 1 },
+    ], s => `odom ${d.enc_speed} m/s (white, +/- ${s[0].max?.toFixed(2)}) | throttle ${d.speed_cmd} (red, +/- 1)`, d.marks);
+  }).catch(() => { busy = false; });
+}
+
+function loadLog() {
+  const f = document.getElementById('logsel').value;
+  if (!f) return;
+  fetch('/logs/' + f).then(r => r.text()).then(txt => {
+    const lines = txt.trim().split('\n');
+    const marks = lines.filter(l => l.startsWith('# mark'))
+      .map(l => { const p = l.split(','); return [parseFloat(p[1]), p.slice(2).join(',')]; });
+    const rows = lines.filter(l => !l.startsWith('#')).slice(1).map(l => l.split(',').map(Number));
+    const moving = rows.filter(r => r[1] || r[2]).length;
+    document.getElementById('loginfo').textContent =
+      `${f}: ${rows.length} rows, ${marks.length} changes, ${moving} with a button down`;
+    drawSeries('logchart', [
+      { pts: rows.map(r => [r[0], r[5]]), color: '#FFFFFF', unit: 'm/s' },
+      { pts: rows.map(r => [r[0], r[3]]), color: '#FF0033', fixed: 1 },
+      { pts: rows.map(r => [r[0], r[4]]), color: '#FFD700', fixed: 1 },
+    ], s => `odom m/s (white, +/- ${s[0].max?.toFixed(2)}) | throttle (red) | steer (yellow)`, marks);
+  });
+}
+
+function saveLog() {
+  // Snapshot what is on the live chart to a csv, then show it right away.
+  post('/logs/save').then(() => refreshLogs(true));
+}
+
+function refreshLogs(loadLatest) {
+  fetch('/logs').then(r => r.json()).then(names => {
+    const sel = document.getElementById('logsel');
+    sel.innerHTML = names.map(n => `<option>${n}</option>`).join('');
+    sel.selectedIndex = names.length - 1;  // Load defaults to the latest save
+    if (loadLatest && names.length) loadLog();
+  });
+}
+
+refreshLogs(false);
+
+update();
+setInterval(update, 120);  // /drive runs at 15 Hz; poll a little faster
+</script>
+</main>
+</body>
+</html>
