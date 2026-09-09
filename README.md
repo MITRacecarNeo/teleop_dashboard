@@ -1,8 +1,8 @@
 # Web Teleop Dashboard
 
-Manual driving for the Neoracer from a browser, on port 8087. Four buttons, bound to WASD and the arrow keys, drive the car forward, back, left, and right, two at once for a turn on the move, with the camera, the lidar, and the wheel encoder in view. Two sliders set how hard the buttons push.
+Manual driving for the RACECAR Neo from a browser, on port 8081. Four buttons, bound to WASD and the arrow keys, drive the car forward, back, left, and right, two at once for a turn on the move, with the camera, the lidar, and the wheel encoder in view. Two sliders set how hard the buttons push.
 
-The service name is `neoracer-webteleop`, not `neoracer-teleop`: that name belongs to the driver's core stack, which this dashboard rides on.
+The service name is `racecar-webteleop`, not `racecar-teleop`: that name belongs to the driver's core stack, which this dashboard rides on.
 
 ## Contents
 
@@ -25,7 +25,7 @@ git clone https://github.com/Neobotics-Foundation-Inc/teleop_dashboard.git
 bash teleop_dashboard/setup.sh
 ```
 
-setup.sh points neoracer-webteleop.service at this checkout wherever it sits and copies nothing, so the repository can live anywhere the racecar user can read. A first install leaves the service stopped and disabled; start it with `bash setup.sh enable`. Dashboard: `http://<car-ip>:8087`.
+setup.sh points racecar-webteleop.service at this checkout wherever it sits and copies nothing, so the repository can live anywhere the racecar user can read. A first install leaves the service stopped and disabled; start it with `bash setup.sh enable`. Dashboard: `http://<car-ip>:8081`.
 
 Re-running setup.sh updates the unit, keeps the car's tuned teleop.yaml, and leaves the enable state alone: a running service restarts on the new code, a stopped one stays stopped.
 
@@ -38,10 +38,10 @@ Run on the car, from the checkout:
 | `bash setup.sh` | install or update the unit; a first install does not start it |
 | `bash setup.sh enable` | start now and at every boot |
 | `bash setup.sh disable` | stop now and keep off across boots |
-| `bash setup.sh restart` | restart; takes port 8087 back first |
+| `bash setup.sh restart` | restart; takes port 8081 back first |
 | `bash setup.sh remove` | stop, disable, and uninstall the unit; keeps teleop.yaml |
 
-Enable, restart, and an update of a running service clear port 8087 first. A dashboard left over from an earlier install under a different unit name or directory, or any other service on 8087, is stopped through systemd; a `teleop.py` started by hand is signalled directly. Without this the new instance would fail to bind and loop on `Restart=on-failure`.
+Enable, restart, and an update of a running service clear port 8081 first. A dashboard left over from an earlier install under a different unit name or directory, or any other service on 8081, is stopped through systemd; a `teleop.py` started by hand is signalled directly. Without this the new instance would fail to bind and loop on `Restart=on-failure`.
 
 ## Driving
 
@@ -92,7 +92,6 @@ Save rewrites the numbers in place, so the comments in the yaml survive.
 Anything else publishing /drive will fight this service at the mux and the car will sit still or stutter:
 
 - The wallfollow, pursuit, eps, smartfollow, and linefollow dashboards all publish /drive. Stop them before starting this one: `racecar service stop wallfollow`, and the same for the others.
-- neoracer-autonomy runs a twist bridge that idles at zero on /drive. Disable it while using webteleop: `sudo systemctl disable --now neoracer-autonomy`
 - A leftover Jupyter kernel that ever created a racecar object keeps publishing /drive. Restart the jupyter service to clear them.
 
 Check with: `ros2 topic info -v /drive` (there should be exactly one publisher: webteleop).
@@ -111,8 +110,8 @@ cd teleop_dashboard && pytest -q
 
 ## Safety
 
-The neoracer mux forwards /drive with no software deadman. The transmitter's SWC/SWB switch is the physical autonomy gate. The shipped yaml has speed at 0.0, so the buttons steer but the car cannot move until the slider is raised. The speed command is hard capped at 1.0 either way in code, and the service drives zero after `cmd_timeout` without a command.
+The RACECAR Neo mux gates /drive on the RB bumper and zeroes output when /joy or the active source goes stale; a FlySky transmitter can hold the gate instead when rc_authority_enable is set. The shipped yaml has speed at 0.0, so the buttons steer but the car cannot move until the slider is raised. The speed command is hard capped at 1.0 either way in code, and the service drives zero after `cmd_timeout` without a command.
 
 ## Car specifics
 
-This package is calibrated for the Neoracer: JPEG frames on /camera/color, LakiBeam lidar angle mapping, steering sign, speed feedback from /odom, ROS Humble paths. The steering sign was verified physically on the sibling dashboards and is the same here.
+This package is calibrated for the RACECAR Neo: JPEG frames on /camera/color, LakiBeam lidar angle mapping, steering sign, speed feedback from /odom, ROS Humble paths. The steering sign was verified physically on the sibling dashboards and is the same here.

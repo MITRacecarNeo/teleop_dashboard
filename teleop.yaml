@@ -2,7 +2,7 @@
 # Save on the dashboard writes this file; Reset or Load re-reads it.
 
 speed: 0.0          # 0..1 throttle while forward or back is held. Ships at
-                    # 0.0: the neoracer mux has no ROS deadman (the
+                    # 0.0: raise deliberately; the mux gates but the
                     # transmitter SWB switch is the gate), so the buttons do
                     # nothing until you raise it.
 angle: 1.0          # 0..1 steering while left or right is held; 1 = full lock

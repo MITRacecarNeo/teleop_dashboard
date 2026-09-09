@@ -3,7 +3,7 @@
 in a browser, with the camera, the lidar, and the encoder in view.
 
 Same pattern as the other lab dashboards (stdlib HTTP + rclpy) on port
-8087. The browser holds a command of two axes, forward/back and left/right,
+8081. The browser holds a command of two axes, forward/back and left/right,
 each -1, 0, or +1, from whichever buttons or keys are down at once, and
 posts it on every change and every 100 ms while anything is held:
 
@@ -16,8 +16,8 @@ page that lost focus with a key down all coast to zero rather than driving
 the last command forever. That is the one thing this dashboard adds over
 the student library's rc.drive.set_speed_angle.
 
-CAUTION: the neoracer mux forwards /drive with no ROS deadman; the physical
-gate is the SWC/SWB switch on the Flysky transmitter. The shipped yaml has
+CAUTION: the RACECAR Neo mux gates /drive on the RB bumper and zeroes
+output when /joy or the active source goes stale. The shipped yaml has
 speed at 0.0 so the buttons do nothing until the slider is raised.
 
 /drive steering is negated on publish: positive on the wire turns this car
@@ -46,7 +46,7 @@ from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
 import yaml
 
-PORT = 8087
+PORT = 8081
 BASE = Path(__file__).resolve().parent
 YAML_PATH = BASE / 'teleop.yaml'
 LOG_DIR = BASE / 'logs'

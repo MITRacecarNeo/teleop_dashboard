@@ -1,5 +1,5 @@
 #!/bin/bash
-# Set up the Web Teleop Dashboard service on a stock Neoracer.
+# Set up the Web Teleop Dashboard service on a stock RACECAR Neo.
 #
 # On the car:
 #   git clone https://github.com/Neobotics-Foundation-Inc/teleop_dashboard.git
@@ -9,7 +9,7 @@
 # writes that path into the unit and copies nothing, so the checkout can live
 # anywhere. Idempotent: safe to re-run.
 #
-# A first install leaves neoracer-webteleop.service installed, stopped, and
+# A first install leaves racecar-webteleop.service installed, stopped, and
 # disabled; start it with `bash setup.sh enable`. A re-run keeps whatever state
 # the service is in, restarting it only when it is already running.
 #
@@ -17,7 +17,7 @@
 #   (none)    install or update the unit; a first install does not start it
 #   enable    start now and at every boot
 #   disable   stop now and keep off across boots
-#   restart   restart the service, taking port 8087 back first
+#   restart   restart the service, taking port 8081 back first
 #   remove    stop, disable, and uninstall the unit; files here are kept
 #
 # Needs nothing beyond the stock image: ROS Humble at /opt/ros/humble, the
@@ -25,10 +25,10 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SVC=neoracer-webteleop.service
+SVC=racecar-webteleop.service
 UNIT_IN="$SCRIPT_DIR/$SVC.in"
 UNIT="/etc/systemd/system/$SVC"
-PORT=8087
+PORT=8081
 
 # The unit ships as a template; @DIR@ becomes this checkout, so the service
 # always runs the copy it was installed from.
