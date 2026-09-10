@@ -20,7 +20,7 @@
 #   restart   restart the service, taking port 8081 back first
 #   remove    stop, disable, and uninstall the unit; files here are kept
 #
-# Needs nothing beyond the stock image: ROS Humble at /opt/ros/humble, the
+# Needs nothing beyond the stock image: ROS Jazzy at /opt/ros/jazzy, the
 # driver workspace at /home/racecar/ros2_ws, and the racecar user.
 set -eo pipefail
 

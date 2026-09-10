@@ -4,7 +4,7 @@ Runs without a ROS graph: Node.__init__ and the create_* factories are
 stubbed, so the real TeleopNode.__init__ still sets every field and the
 timer callback is driven by hand with an explicit clock.
 
-    source /opt/ros/humble/setup.bash
+    source /opt/ros/jazzy/setup.bash
     source /home/racecar/ros2_ws/install/setup.bash
     pytest -q
 """
@@ -207,6 +207,83 @@ def test_camera_preview_is_encoded(node):
     node._image_cb(msg)
     assert tp._preview[:2] == b'\xff\xd8'
     assert tp._state['res'] == [640, 480]
+
+
+def test_depth_preview_is_encoded(node):
+    raw = np.full((480, 640), 1500, np.uint16)  # a flat wall at 1.5 m
+    msg = Image()
+    msg.encoding = '16UC1'
+    msg.height, msg.width = 480, 640
+    msg.data = raw.tobytes()
+    node._last_depth_preview = 0.0
+    node._depth_cb(msg)
+    assert tp._depth_preview[:2] == b'\xff\xd8'
+    assert tp._state['depth_res'] == [640, 480]
+
+
+def test_depth_preview_takes_metres_too(node):
+    msg = Image()
+    msg.encoding = '32FC1'
+    msg.height, msg.width = 480, 640
+    msg.data = np.full((480, 640), 1.5, np.float32).tobytes()
+    node._last_depth_preview = 0.0
+    node._depth_cb(msg)
+    assert tp._depth_preview[:2] == b'\xff\xd8'
+
+
+def test_depth_ignores_an_encoding_it_cannot_read(node):
+    tp._depth_preview = b''
+    msg = Image()
+    msg.encoding = 'bgr8'
+    msg.height, msg.width = 480, 640
+    msg.data = np.zeros((480, 640, 3), np.uint8).tobytes()
+    node._last_depth_preview = 0.0
+    node._depth_cb(msg)
+    assert tp._depth_preview == b''
+
+
+def test_a_colour_only_car_does_not_subscribe_to_depth(monkeypatch, params):
+    """An empty depth_topic must not become a subscription.
+
+    A dead topic would sit at 0 fps and read on the dashboard as a broken
+    camera.
+    """
+    topics = []
+    monkeypatch.setattr(tp.Node, '__init__', lambda self, name: None)
+    monkeypatch.setattr(tp.TeleopNode, 'create_publisher',
+                        lambda self, *a, **k: Recorder(), raising=False)
+    monkeypatch.setattr(tp.TeleopNode, 'create_subscription',
+                        lambda self, kind, topic, *a, **k: topics.append(topic), raising=False)
+    monkeypatch.setattr(tp.TeleopNode, 'create_timer',
+                        lambda self, *a, **k: None, raising=False)
+    params['depth_topic'] = ''
+    tp.TeleopNode()
+    assert '/camera/depth' not in topics
+    assert params['camera_topic'] in topics
+
+
+def test_depth_ramp_orders_near_over_far():
+    """Near must read brighter than far.
+
+    A no-return pixel must be black rather than sharing the dark end with a
+    distant wall.
+    """
+    frame = np.array([[0.0, 0.5, 3.9, 0.0]], np.float32)  # 0 = no return
+    out = tp._colorize_depth(frame, 4.0)
+    near, far = out[0][1].sum(), out[0][2].sum()
+    assert near > far
+    assert far > 0
+    assert tuple(out[0][0]) == tp.NO_RETURN_BGR
+    assert tuple(out[0][3]) == tp.NO_RETURN_BGR
+
+
+def test_depth_beyond_the_ramp_stays_visible():
+    """A wall past depth_max_m clamps to the dark end.
+
+    It must not vanish into the no-return black.
+    """
+    out = tp._colorize_depth(np.array([[99.0]], np.float32), 4.0)
+    assert tuple(out[0][0]) != tp.NO_RETURN_BGR
 
 
 def test_rows_and_history_record_the_command(node):

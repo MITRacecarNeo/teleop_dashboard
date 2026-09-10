@@ -14,5 +14,13 @@ cmd_timeout: 0.5    # seconds without a command from the browser before the
 # Which camera topic to read. Latest driver: /camera/color. Older cars: /camera.
 camera_topic: /camera/color
 
+# The D435i depth stream, shown under the color frame. Leave it empty on a
+# car whose camera is color only; the card then shows the color frame alone.
+depth_topic: /camera/depth
+
+depth_max_m: 4.0      # far end of the depth ramp, metres. Anything past this
+                      # clamps to the dark end instead of dropping out. 4 m
+                      # suits a lab floor; raise it for a corridor.
+
 preview_width: 320    # live view width sent to the browser, pixels
 preview_quality: 45   # live view jpeg quality 1..100

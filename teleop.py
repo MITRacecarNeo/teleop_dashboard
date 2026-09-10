@@ -2,6 +2,10 @@
 """RACECAR Neo web teleop service: drive the car from buttons or the keyboard
 in a browser, with the camera, the lidar, and the encoder in view.
 
+The camera card carries both D435i streams: the color frame over a colorized
+depth frame. Depth is optional; a car whose camera has no depth stream leaves
+depth_topic empty and the card shows the color frame alone.
+
 Same pattern as the other lab dashboards (stdlib HTTP + rclpy) on port
 8081. The browser holds a command of two axes, forward/back and left/right,
 each -1, 0, or +1, from whichever buttons or keys are down at once, and
@@ -60,13 +64,24 @@ HIST_POINTS = 300
 
 TUNE_KEYS = ('speed', 'angle')
 
+# Depth colouring. Near reads bright and far reads dark, on the perceptually
+# uniform inferno ramp: a single ordered scale, so a step in colour is a step
+# in distance, and it survives being read by a colour blind student. The ramp
+# starts at DEPTH_FLOOR rather than 0 so the darkest real reading is still
+# above black, which leaves pure black to mean "no return" on its own.
+DEPTH_FLOOR = 24
+DEPTH_NEAR_M = 0.15     # below the D435i minimum range; nothing valid is nearer
+NO_RETURN_BGR = (0, 0, 0)
+
 _lock = threading.Lock()
 _params: dict = {}
 _state: dict = {'fwd': 0, 'turn': 0, 'held': False, 'timed_out': False,
                 'speed_cmd': 0.0, 'steer': 0.0, 'enc_speed': 0.0,
                 'scan': [], 'res': [0, 0], 'cam_fps': 0.0,
+                'depth_res': [0, 0], 'depth_fps': 0.0,
                 'hist': [], 'marks': []}
 _preview = b''
+_depth_preview = b''
 # The browser's command and when it last arrived. Read by the timer.
 _cmd: dict = {'fwd': 0, 'turn': 0, 'stamp': 0.0}
 _hist: deque = deque(maxlen=1200)
@@ -103,6 +118,7 @@ def _clean(p):
     p['speed'] = max(0.0, clamp_speed(p['speed']))
     p['angle'] = max(0.0, min(1.0, float(p['angle'])))
     p['cmd_timeout'] = max(0.1, float(p.get('cmd_timeout', 0.5)))
+    p['depth_max_m'] = max(0.5, float(p.get('depth_max_m', 4.0)))
 
 
 def load_params():
@@ -166,8 +182,14 @@ class TeleopNode(Node):
         super().__init__('webteleop')
         with _lock:
             cam_topic = _params['camera_topic']
+            depth_topic = _params.get('depth_topic') or ''
         self._pub = self.create_publisher(AckermannDriveStamped, '/drive', 1)
         self.create_subscription(Image, cam_topic, self._image_cb, qos_profile_sensor_data)
+        # Depth is a separate stream on the same camera, and only the D435i
+        # has one. An empty depth_topic is a car whose camera is colour only;
+        # subscribing to nothing would sit at 0 fps and read as a fault.
+        if depth_topic:
+            self.create_subscription(Image, depth_topic, self._depth_cb, qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Odometry, '/odom', self._odom_cb, qos_profile_sensor_data)
         # /drive at a fixed rate whether or not the browser is talking, so
@@ -179,7 +201,9 @@ class TeleopNode(Node):
         self._steer_cmd = 0.0
         self._res = (0, 0)
         self._last_preview = 0.0
+        self._last_depth_preview = 0.0
         self._frame_stamps = []
+        self._depth_stamps = []
 
     def _odom_cb(self, msg):
         self._enc = msg.twist.twist.linear.x
@@ -194,13 +218,21 @@ class TeleopNode(Node):
         with _lock:
             _state['scan'] = scan
 
+    @staticmethod
+    def _tick_fps(stamps, now, key):
+        """Record a frame arrival and publish the stream's rate.
+
+        The rate is over the last two seconds. Returns the trimmed stamp list.
+        """
+        stamps = [t for t in stamps if now - t < 2.0] + [now]
+        with _lock:
+            _state[key] = round(len(stamps) / 2.0, 1)
+        return stamps
+
     def _image_cb(self, msg):
         global _preview
         now = time.monotonic()
-        self._frame_stamps.append(now)
-        self._frame_stamps = [t for t in self._frame_stamps if now - t < 2.0]
-        with _lock:
-            _state['cam_fps'] = round(len(self._frame_stamps) / 2.0, 1)
+        self._frame_stamps = self._tick_fps(self._frame_stamps, now, 'cam_fps')
         if now - self._last_preview < 1.0 / PREVIEW_RATE_HZ:
             return
         self._last_preview = now
@@ -222,6 +254,39 @@ class TeleopNode(Node):
         with _lock:
             _preview = cv2.imencode('.jpg', small, quality)[1].tobytes()
             _state['res'] = [w, h]
+
+    def _depth_cb(self, msg):
+        """Colorize the depth frame for the browser.
+
+        16UC1 is millimetres, the D435i default; 32FC1 is metres, which some
+        drivers publish instead. Both reach the ramp as metres.
+        """
+        global _depth_preview
+        now = time.monotonic()
+        self._depth_stamps = self._tick_fps(self._depth_stamps, now, 'depth_fps')
+        if now - self._last_depth_preview < 1.0 / PREVIEW_RATE_HZ:
+            return
+        self._last_depth_preview = now
+        if msg.encoding in ('16UC1', 'mono16'):
+            raw = np.frombuffer(msg.data, dtype=np.uint16).reshape(msg.height, msg.width)
+            metres = raw.astype(np.float32) / 1000.0
+        elif msg.encoding == '32FC1':
+            metres = np.frombuffer(msg.data, dtype=np.float32).reshape(msg.height, msg.width)
+        else:
+            return
+        h, w = metres.shape
+        with _lock:
+            p = dict(_params)
+        pw = int(p['preview_width'])
+        # Nearest neighbour, not area: averaging a valid reading against a
+        # zero would invent a surface halfway to a hole in the depth image.
+        small = cv2.resize(metres, (pw, max(1, round(pw * h / w))),
+                           interpolation=cv2.INTER_NEAREST)
+        with _lock:
+            _depth_preview = cv2.imencode(
+                '.jpg', _colorize_depth(small, p['depth_max_m']),
+                [cv2.IMWRITE_JPEG_QUALITY, int(p['preview_quality'])])[1].tobytes()
+            _state['depth_res'] = [w, h]
 
     def _actuate(self, now=None):
         now = time.monotonic() if now is None else now
@@ -252,6 +317,23 @@ class TeleopNode(Node):
                            'hist': _thin(_hist), 'marks': list(_marks)})
 
 
+def _colorize_depth(metres, far_m):
+    """Turn depth in metres into a BGR preview.
+
+    Bright is near, dark is far, pure black is no return. A reading beyond
+    far_m clamps to the dark end rather than dropping out, so a far wall
+    still reads as a wall.
+    """
+    valid = metres > 0
+    near = min(DEPTH_NEAR_M, far_m)
+    span = max(far_m - near, 1e-3)
+    norm = np.clip((metres - near) / span, 0.0, 1.0)
+    ramp = (DEPTH_FLOOR + (1.0 - norm) * (255 - DEPTH_FLOOR)).astype(np.uint8)
+    out = cv2.applyColorMap(ramp, cv2.COLORMAP_INFERNO)
+    out[~valid] = NO_RETURN_BGR
+    return out
+
+
 def _thin(hist):
     """Even sample of `hist` down to HIST_POINTS, newest row always kept."""
     rows = list(hist)
@@ -279,6 +361,13 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith('/frame'):
             with _lock:
                 data = _preview
+            if data:
+                self._send(data, 'image/jpeg', cache='no-store')
+            else:
+                self.send_error(503)
+        elif self.path.startswith('/depth'):
+            with _lock:
+                data = _depth_preview
             if data:
                 self._send(data, 'image/jpeg', cache='no-store')
             else:

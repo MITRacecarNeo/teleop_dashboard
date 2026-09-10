@@ -1,6 +1,6 @@
 # Web Teleop Dashboard
 
-Manual driving for the RACECAR Neo from a browser, on port 8081. Four buttons, bound to WASD and the arrow keys, drive the car forward, back, left, and right, two at once for a turn on the move, with the camera, the lidar, and the wheel encoder in view. Two sliders set how hard the buttons push.
+Manual driving for the RACECAR Neo from a browser, on port 8081. Four buttons, bound to WASD and the arrow keys, drive the car forward, back, left, and right, two at once for a turn on the move, with both camera streams, the lidar, and the wheel encoder in view. Two sliders set how hard the buttons push.
 
 The service name is `racecar-webteleop`, not `racecar-teleop`: that name belongs to the driver's core stack, which this dashboard rides on.
 
@@ -62,11 +62,12 @@ Keys: W, A, S, D or the arrow keys. Key auto-repeat is ignored; a key drives fro
 
 ## Dashboard
 
-Top row, the two sensor views side by side at the same width, then the encoder card across the rest:
+Top row, the camera stack, the lidar, then the encoder and the logs down the rest of the width:
 
-- Camera view: the live frame.
+- Camera card: the live color frame with the depth frame under it, same width and same framing, so a feature lines up vertically between the two.
+- Depth view: bright is near, dark is `depth_max_m` away, black is a pixel the camera got no return from, which is what glass, a mirror, and anything past the far end all look like. The ramp is inferno, one ordered scale from dark to bright, so a step in color is a step in distance. A car with no `depth_topic` set drops the pane; a car that has one and receives nothing keeps it, so a dead stream stays visible as a fault.
 - Lidar view: scan points around the car, the nose up, range rings at 1, 2, and 3 m, scroll to zoom.
-- Encoder card: a state box, STOPPED, FORWARD, FORWARD LEFT, and so on, red while moving, amber on TIMED OUT, and under it the live chart: measured speed from `/odom` in white on its own scale, the commanded throttle in red on a fixed -1 to 1, yellow markers at every slider change. The gap between the two traces is the car's lag and the difference between a commanded fraction and real meters per second.
+- Encoder card: a state box, STOPPED, FORWARD, FORWARD LEFT, and so on, ember while moving, crimson on TIMED OUT, and under it the live chart: measured speed from `/odom` in white on its own scale, the commanded throttle in orange on a fixed -1 to 1, dashed rules at every slider change. The gap between the two traces is the car's lag and the difference between a commanded fraction and real meters per second.
 
 Second row: the drive pad on the left, the two sliders on the right. The page shows only names and numbers; every explanation is a tooltip. Hover a view, the chart, the state box, a pad button, or a slider to read what it does.
 
@@ -83,7 +84,9 @@ teleop.yaml:
 | speed | 0..1 throttle while forward or back is held; ships at 0.0 |
 | angle | 0..1 steering while left or right is held; 1 is full lock |
 | cmd_timeout | seconds without a command before the service drives zero; not on the dashboard |
-| camera_topic, preview_width, preview_quality | `/camera/color` on the latest driver, `/camera` on older cars; live view size and jpeg quality |
+| camera_topic, preview_width, preview_quality | `/camera/color` on the latest driver, `/camera` on older cars; live view size and jpeg quality, shared by both views |
+| depth_topic | `/camera/depth` on a D435i. Empty on a car whose camera is color only, which drops the depth pane rather than subscribing to a topic nobody publishes |
+| depth_max_m | far end of the depth ramp, metres; anything past it clamps to the dark end instead of dropping out |
 
 Save rewrites the numbers in place, so the comments in the yaml survive.
 
@@ -100,10 +103,10 @@ The camera and the lidar are read directly, so the driver's inference node does 
 
 ## Tests
 
-`tests/test_teleop.py` drives the command endpoint and the timer callback with an explicit clock, so no ROS graph, camera, or browser is needed. It covers the axis mapping and its squash to -1, 0, +1, forward and left as one command, the steering negation on /drive, the timeout and its recovery, the speed cap in both directions, the scan thinning, the preview encoding, and the yaml round trip that keeps the comments.
+`tests/test_teleop.py` drives the command endpoint and the timer callback with an explicit clock, so no ROS graph, camera, or browser is needed. It covers the axis mapping and its squash to -1, 0, +1, forward and left as one command, the steering negation on /drive, the timeout and its recovery, the speed cap in both directions, the scan thinning, the color and depth preview encoding in every encoding either stream arrives in, the depth ramp's ordering and its separation of "far" from "no return", the empty `depth_topic` that must not become a subscription, and the yaml round trip that keeps the comments.
 
 ```
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source /home/racecar/ros2_ws/install/setup.bash
 cd teleop_dashboard && pytest -q
 ```
@@ -114,4 +117,4 @@ The RACECAR Neo mux gates /drive on the RB bumper and zeroes output when /joy or
 
 ## Car specifics
 
-This package is calibrated for the RACECAR Neo: JPEG frames on /camera/color, LakiBeam lidar angle mapping, steering sign, speed feedback from /odom, ROS Humble paths. The steering sign was verified physically on the sibling dashboards and is the same here.
+This package is calibrated for the RACECAR Neo: JPEG frames on /camera/color, D435i depth on /camera/depth, RPLIDAR angle mapping, steering sign, speed feedback from /odom, ROS Jazzy paths. The steering sign was verified physically on the sibling dashboards and is the same here.
