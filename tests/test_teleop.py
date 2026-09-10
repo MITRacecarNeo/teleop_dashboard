@@ -18,6 +18,15 @@ import cv2
 import numpy as np
 import pytest
 from sensor_msgs.msg import Image, LaserScan
+from vision_msgs.msg import (
+    BoundingBox2D,
+    Detection2D,
+    Detection2DArray,
+    ObjectHypothesis,
+    ObjectHypothesisWithPose,
+    Point2D,
+    Pose2D,
+)
 
 BASE = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location('teleop', BASE / 'teleop.py')
@@ -185,16 +194,78 @@ def test_a_released_command_never_reads_as_timed_out(node):
 
 # ---- sensors ----
 
-def test_scan_is_thinned_and_in_student_degrees(node):
+def make_scan(points=1080, span_deg=360.0, fill=2.0):
+    """A scan shaped like this car's: 1080 points over 360 degrees."""
     msg = LaserScan()
-    msg.angle_min = -math.pi
-    msg.angle_increment = 2 * math.pi / 360
+    msg.angle_min = -math.radians(span_deg) / 2
+    msg.angle_max = math.radians(span_deg) / 2
+    msg.angle_increment = math.radians(span_deg) / points
     msg.range_min, msg.range_max = 0.05, 12.0
-    msg.ranges = [2.0] * 360
-    node._scan_cb(msg)
-    scan = tp._state['scan']
-    assert len(scan) == 120
-    assert scan[0] == [180.0, 2.0]  # raw -pi is the tail, student +180
+    msg.ranges = [fill] * points
+    return msg
+
+
+def place(msg, raw_deg, value):
+    """Put `value` at the ray nearest raw angle `raw_deg`; return its index."""
+    i = round((math.radians(raw_deg) - msg.angle_min) / msg.angle_increment) % len(msg.ranges)
+    msg.ranges[i] = value
+    return i
+
+
+def test_scan_is_thinned(node):
+    node._scan_cb(make_scan(points=360, span_deg=360.0))
+    assert len(tp._state['scan']) == 120
+
+
+def test_mount_yaw_puts_the_nose_at_the_raw_180_edge():
+    # Measured on hardware: the Neo's RPLIDAR faces aft, so an object in
+    # front reports at raw 180. The neoracer read 0 there.
+    assert tp.LIDAR_MOUNT_YAW_DEG == 180.0
+
+
+def test_object_in_front_reads_as_zero_degrees(node):
+    msg = make_scan()
+    i = place(msg, 180.0, 1.0)
+    assert node._student_deg(msg, i) == pytest.approx(0.0, abs=0.5)
+
+
+def test_object_off_the_right_reads_as_positive(node):
+    # Measured on hardware: an object off the car's right sits at raw +90.
+    msg = make_scan()
+    i = place(msg, 90.0, 1.0)
+    assert node._student_deg(msg, i) == pytest.approx(90.0, abs=0.5)
+
+
+def test_left_and_right_are_not_mirrored(node):
+    """A handedness flip would put the whole view in a mirror."""
+    msg = make_scan()
+    right = place(msg, 90.0, 2.0)
+    left = place(msg, -90.0, 3.0)
+    assert node._student_deg(msg, right) == pytest.approx(90.0, abs=0.5)
+    assert node._student_deg(msg, left) == pytest.approx(-90.0, abs=0.5)
+
+
+def test_mapping_is_a_yaw_not_a_flip(node):
+    # student_old = -raw, student_new = 180 - raw: a constant 180 apart, so
+    # ordering around the circle is preserved. This is the whole bug.
+    msg = make_scan()
+    for raw in (-150, -90, -30, 0, 30, 90, 150):
+        i = place(msg, raw, 1.0)
+        assert ((node._student_deg(msg, i) - (-raw)) % 360) == pytest.approx(180.0, abs=0.5)
+
+
+def test_270_degree_scan_still_maps(node):
+    """Nothing here assumes a sweep width; the angle comes from the message."""
+    msg = make_scan(points=811, span_deg=270.0)
+    i = place(msg, 90.0, 2.0)
+    assert node._student_deg(msg, i) == pytest.approx(90.0, abs=0.5)
+
+
+def test_forward_facing_lidar_needs_no_offset(node, monkeypatch):
+    monkeypatch.setattr(tp, 'LIDAR_MOUNT_YAW_DEG', 0.0)
+    msg = make_scan()
+    i = place(msg, 0.0, 1.5)
+    assert node._student_deg(msg, i) == pytest.approx(0.0, abs=0.5)
 
 
 def test_camera_preview_is_encoded(node):
@@ -284,6 +355,94 @@ def test_depth_beyond_the_ramp_stays_visible():
     """
     out = tp._colorize_depth(np.array([[99.0]], np.float32), 4.0)
     assert tuple(out[0][0]) != tp.NO_RETURN_BGR
+
+
+def make_detection(cx, cy, w, h, label='person', score=0.9):
+    d = Detection2D()
+    d.bbox = BoundingBox2D()
+    d.bbox.center = Pose2D()
+    d.bbox.center.position = Point2D(x=float(cx), y=float(cy))
+    d.bbox.size_x, d.bbox.size_y = float(w), float(h)
+    hyp = ObjectHypothesisWithPose()
+    hyp.hypothesis = ObjectHypothesis()
+    hyp.hypothesis.class_id = label
+    hyp.hypothesis.score = float(score)
+    d.results.append(hyp)
+    return d
+
+
+def det_array(*dets):
+    msg = Detection2DArray()
+    msg.detections.extend(dets)
+    return msg
+
+
+def test_detections_leave_as_fractions_of_the_frame(node):
+    """Pixels in, fractions out: the browser scales them to its own preview."""
+    tp._state['res'] = [640, 480]
+    # Centred 320x240 box: a quarter in from each edge, half the frame wide.
+    node._det_cb(det_array(make_detection(320, 240, 320, 240)))
+    x, y, w, h, label, score = tp._state['dets'][0]
+    assert (x, y, w, h) == (0.25, 0.25, 0.5, 0.5)
+    assert label == 'person'
+    assert score == 0.9
+
+
+def test_a_corner_detection_stays_inside_the_frame(node):
+    tp._state['res'] = [640, 480]
+    node._det_cb(det_array(make_detection(50, 40, 100, 80)))
+    x, y, w, h = tp._state['dets'][0][:4]
+    assert (x, y) == (0.0, 0.0)
+    # Boxes ship rounded to 4 places: 0.0001 of a 368 px view is 0.04 px.
+    assert w == pytest.approx(100 / 640, abs=5e-5)
+    assert h == pytest.approx(80 / 480, abs=5e-5)
+
+
+def test_detections_before_the_first_frame_are_dropped(node):
+    """Without a frame size there is nothing to normalize against."""
+    tp._state['res'] = [0, 0]
+    tp._state['dets'] = []
+    node._det_cb(det_array(make_detection(320, 240, 320, 240)))
+    assert tp._state['dets'] == []
+
+
+def test_a_detection_with_no_hypothesis_still_draws(node):
+    tp._state['res'] = [640, 480]
+    d = Detection2D()
+    d.bbox = BoundingBox2D()
+    d.bbox.center = Pose2D()
+    d.bbox.center.position = Point2D(x=320.0, y=240.0)
+    d.bbox.size_x, d.bbox.size_y = 64.0, 48.0
+    node._det_cb(det_array(d))
+    assert tp._state['dets'][0][4:] == ['', 0.0]
+
+
+def test_stale_detections_are_cleared(node):
+    """A frozen box on a live frame would be a lie about what is out there."""
+    tp._state['res'] = [640, 480]
+    node._det_available = True
+    node._det_cb(det_array(make_detection(320, 240, 320, 240)))
+    node._expire_detections(node._last_det + 0.1)
+    assert tp._state['det_ok'] is True
+    assert tp._state['dets']
+    node._expire_detections(node._last_det + tp.DET_TIMEOUT_S + 0.1)
+    assert tp._state['det_ok'] is False
+    assert tp._state['dets'] == []
+
+
+def test_a_car_with_no_detector_never_subscribes(monkeypatch, params):
+    topics = []
+    monkeypatch.setattr(tp.Node, '__init__', lambda self, name: None)
+    monkeypatch.setattr(tp.TeleopNode, 'create_publisher',
+                        lambda self, *a, **k: Recorder(), raising=False)
+    monkeypatch.setattr(tp.TeleopNode, 'create_subscription',
+                        lambda self, kind, topic, *a, **k: topics.append(topic), raising=False)
+    monkeypatch.setattr(tp.TeleopNode, 'create_timer',
+                        lambda self, *a, **k: None, raising=False)
+    params['detections_topic'] = ''
+    node = tp.TeleopNode()
+    assert node._det_available is False
+    assert '/edgetpu/inference' not in topics
 
 
 def test_rows_and_history_record_the_command(node):

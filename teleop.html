@@ -56,6 +56,39 @@
      feature lines up vertically between the two. */
   .stack { display: grid; gap: 0.7rem; }
   .stack .view { max-width: 368px; }
+  /* The overlay is a canvas the size of the colour view, on top of it. The
+     figure is the positioning context; the canvas never takes pointer
+     events, so the view stays as clickable as it was. */
+  .stack figure { position: relative; }
+  /* The generic canvas rule below paints a tarmac background and caps the
+     width; both would put an opaque panel over the frame, so the overlay
+     opts out of them. Its size is set in px by drawOverlay. */
+  #overlay { position: absolute; left: 0; top: 0; pointer-events: none; border-radius: 6px;
+             background: none; max-width: none; width: auto; height: auto; }
+  /* The `hidden` attribute works through the UA stylesheet, which the
+     `canvas` rule below outranks: without this, setting hidden on the
+     overlay leaves it displayed. */
+  #overlay[hidden] { display: none; }
+  /* The card rule moves to the row so it still spans the card, not just
+     the width of the heading text now sharing it. */
+  .viewhead { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem;
+              margin-bottom: 0.5rem; padding-bottom: 0.35rem; border-bottom: 2px solid var(--accent-dark); }
+  .viewhead h2 { margin-bottom: 0; padding-bottom: 0; border-bottom: none; }
+  /* A switch rather than a bare checkbox: it is the one control on the card
+     and it should read as one from across the room. */
+  .switch { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.7rem;
+            letter-spacing: 0.07em; text-transform: uppercase; color: rgba(35, 31, 32, 0.55); user-select: none; }
+  .switch input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .switch .track { width: 30px; height: 17px; border-radius: 9px; background: var(--steel);
+                   border: 1px solid rgba(35, 31, 32, 0.22); position: relative; transition: background 140ms ease-out; }
+  .switch .track::after { content: ""; position: absolute; left: 2px; top: 1px; width: 13px; height: 13px;
+                          border-radius: 50%; background: var(--white); box-shadow: 0 1px 2px rgba(35, 31, 32, 0.3);
+                          transition: transform 140ms ease-out; }
+  .switch input:checked + .track { background: var(--accent); border-color: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(13px); }
+  .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .switch input:disabled + .track { opacity: 0.4; }
+  .switch input:disabled ~ span { opacity: 0.5; }
   .stack figure { margin: 0; }
   .stack figcaption { font-size: 0.7rem; letter-spacing: 0.07em; text-transform: uppercase; color: rgba(35, 31, 32, 0.55); margin-top: 0.3rem; }
   canvas { background: var(--tarmac); border-radius: 6px; width: 100%; max-width: 560px; height: auto; display: block; }
@@ -103,15 +136,23 @@
 <main>
 <div class="grid">
   <div class="card">
-    <h2>Camera</h2>
+    <div class="viewhead">
+      <h2>Camera</h2>
+      <label class="switch" id="detswitch" title="Draw the object detector's boxes on the color frame. Reads vision_msgs/Detection2DArray from detections_topic in teleop.yaml.">
+        <input type="checkbox" id="dettoggle">
+        <span class="track"></span>
+        <span>Detections</span>
+      </label>
+    </div>
     <div class="stack">
       <figure>
         <img id="color" class="view" alt="color camera view" title="Live color frame.">
+        <canvas id="overlay"></canvas>
         <figcaption>Color</figcaption>
       </figure>
       <figure id="depthfig">
         <img id="depth" class="view" alt="depth camera view" title="Live depth frame, same lens and the same framing as the color view above. Bright is near, dark is far, black is a pixel the camera got no return from: glass, a mirror, or past the far end of the ramp.">
-        <figcaption id="depthcap">Depth</figcaption>
+        <figcaption>Depth</figcaption>
       </figure>
     </div>
   </div>
@@ -302,6 +343,52 @@ function liveView(id, path) {
 liveView('color', '/frame');
 liveView('depth', '/depth');
 
+// ---- detection overlay ----
+// Boxes arrive as fractions of the source frame, so they are drawn against
+// the colour view's own displayed size and stay correct when the column
+// resizes or the preview width changes.
+const DET_TIMEOUT_S = 1.5;  // matches DET_TIMEOUT_S in teleop.py
+const detToggle = document.getElementById('dettoggle');
+// Seeded from the control rather than assumed off: a browser restores a
+// checkbox across a reload, and the overlay has to agree with the switch.
+const DET = { on: detToggle.checked, boxes: [] };
+detToggle.addEventListener('change', () => { DET.on = detToggle.checked; drawOverlay(); });
+
+function drawOverlay() {
+  const img = document.getElementById('color'), cv = document.getElementById('overlay');
+  const w = Math.round(img.clientWidth), h = Math.round(img.clientHeight);
+  // Wipe first, every time. Switching the overlay off has to take the boxes
+  // with it: a stale box left painted over a live frame is a claim about
+  // what is out there right now.
+  if (cv.width && cv.height) cv.getContext('2d').clearRect(0, 0, cv.width, cv.height);
+  // Nothing to draw, or nothing to draw on: take the canvas out of the page
+  // rather than leaving an empty one sitting over the frame.
+  cv.hidden = !(DET.on && w && h);
+  if (cv.hidden) return;
+  if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; }
+  cv.style.width = w + 'px'; cv.style.height = h + 'px';
+  const x = cv.getContext('2d');
+  x.clearRect(0, 0, w, h);
+  x.font = '600 11px Helvetica';
+  for (const [bx, by, bw, bh, label, score] of DET.boxes) {
+    const px = bx * w, py = by * h, pw = bw * w, ph = bh * h;
+    x.strokeStyle = '#EC8B48'; x.lineWidth = 2;
+    x.strokeRect(px, py, pw, ph);
+    // The chip flips inside the box when the box is against the top edge,
+    // so a detection at the frame's edge keeps its label on screen.
+    const text = score ? `${label} ${Math.round(score * 100)}%` : label;
+    if (!text) continue;
+    const tw = x.measureText(text).width + 8;
+    const above = py >= 15;
+    x.fillStyle = '#EC8B48';
+    x.fillRect(px, above ? py - 15 : py, Math.min(tw, w - px), 15);
+    x.fillStyle = '#231F20';
+    x.fillText(text, px + 4, (above ? py - 4 : py + 11));
+  }
+}
+
+window.addEventListener('resize', drawOverlay);
+
 let VIEW = 4.0;  // lidar view radius in meters, scroll wheel to zoom
 
 function drawLidar(scan) {
@@ -404,17 +491,32 @@ function update() {
     document.getElementById('enc').textContent = d.enc_speed;
     document.getElementById('fps').textContent = d.cam_fps;
     document.getElementById('dfps').textContent = d.depth_fps;
+
+    // The switch reads "Detections" whatever the detector is doing; the
+    // state lives in the tooltip and in the disabled styling, so the caption
+    // row stays as quiet as the two under the views.
+    DET.boxes = d.dets || [];
+    detToggle.disabled = !d.params.detections_topic;
+    document.getElementById('detswitch').title =
+      !d.params.detections_topic
+        ? 'No detections_topic set in teleop.yaml, so there is nothing to draw.'
+      : !d.det_ok
+        ? `Nothing published on ${d.params.detections_topic} for the last `
+          + `${DET_TIMEOUT_S} s. Is the detector running?`
+      : `${d.dets.length} detection(s) at ${d.det_fps} Hz from `
+        + `${d.params.detections_topic}. Each box carries its class and confidence.`;
+    drawOverlay();
     document.getElementById('res').textContent = d.res[0] ? `${d.res[0]}x${d.res[1]}` : 'none';
 
     // A car with no depth topic configured drops the pane; a car that has
     // one and is not receiving keeps it, so a dead stream stays visible as
     // a fault rather than quietly disappearing.
     document.getElementById('depthfig').hidden = !d.params.depth_topic;
-    // The caption carries the ramp's far end, so the view is readable as a
-    // distance rather than only as a picture.
-    document.getElementById('depthcap').textContent = d.depth_res[0]
-      ? `Depth: near to ${d.params.depth_max_m} m, black is no return`
-      : 'Depth: waiting for a frame';
+    // The ramp's far end belongs in the tooltip; the caption is a label.
+    document.getElementById('depth').title =
+      `Live depth frame, same lens and framing as the color view above. `
+      + `Bright is near, dark is ${d.params.depth_max_m} m, black is a pixel `
+      + `the camera got no return from: glass, a mirror, or past the far end.`;
 
     const box = document.getElementById('state');
     const words = [WORDS[d.fwd], TURNS[d.turn]].filter(Boolean).join(' ');

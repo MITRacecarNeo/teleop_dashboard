@@ -6,6 +6,7 @@ The service name is `racecar-webteleop`, not `racecar-teleop`: that name belongs
 
 ## Contents
 
+- [Version](#version)
 - [Install](#install)
 - [Service control](#service-control)
 - [Driving](#driving)
@@ -15,6 +16,17 @@ The service name is `racecar-webteleop`, not `racecar-teleop`: that name belongs
 - [Tests](#tests)
 - [Safety](#safety)
 - [Car specifics](#car-specifics)
+
+## Version
+
+`VERSION` carries `0.8.1`, tracking `racecar_neo_ros2_driver` rather than moving
+on its own: this checkout is the one that release of the driver was tested
+against. `setup_dashboards.sh` reads it and reports a checkout that does not
+match the driver installing it, the same way `racecar setup realsense`
+reconciles the camera against the firmware version the driver pins.
+
+Full history in [docs/changelog.md](docs/changelog.md); the layout and the
+design notes are in [docs/architecture.md](docs/architecture.md).
 
 ## Install
 
@@ -64,9 +76,10 @@ Keys: W, A, S, D or the arrow keys. Key auto-repeat is ignored; a key drives fro
 
 Top row, the camera stack, the lidar, then the encoder and the logs down the rest of the width:
 
-- Camera card: the live color frame with the depth frame under it, same width and same framing, so a feature lines up vertically between the two.
+- Camera card: the live color frame with the depth frame under it, same width and same framing, so a feature lines up vertically between the two. The Detections switch on the card's heading overlays the object detector's boxes on the color frame.
 - Depth view: bright is near, dark is `depth_max_m` away, black is a pixel the camera got no return from, which is what glass, a mirror, and anything past the far end all look like. The ramp is inferno, one ordered scale from dark to bright, so a step in color is a step in distance. A car with no `depth_topic` set drops the pane; a car that has one and receives nothing keeps it, so a dead stream stays visible as a fault.
-- Lidar view: scan points around the car, the nose up, range rings at 1, 2, and 3 m, scroll to zoom.
+- Detections: each box carries its class and confidence, drawn in brand orange. The switch is disabled on a car with no `detections_topic`, and the label reads `no signal` when a configured detector has stopped publishing; boxes older than 1.5 s are cleared rather than left frozen on a live frame. What the boxes say depends on the model the driver has loaded: the shipped default is EfficientDet-Lite0 on COCO, so 90 everyday classes.
+- Lidar view: scan points around the car, the nose up, range rings at 1, 2, and 3 m, scroll to zoom. 0 degrees is the nose. The Neo's RPLIDAR faces aft, so the raw scan is yawed 180 degrees onto that convention by `LIDAR_MOUNT_YAW_DEG`; see [docs/architecture.md](docs/architecture.md).
 - Encoder card: a state box, STOPPED, FORWARD, FORWARD LEFT, and so on, ember while moving, crimson on TIMED OUT, and under it the live chart: measured speed from `/odom` in white on its own scale, the commanded throttle in orange on a fixed -1 to 1, dashed rules at every slider change. The gap between the two traces is the car's lag and the difference between a commanded fraction and real meters per second.
 
 Second row: the drive pad on the left, the two sliders on the right. The page shows only names and numbers; every explanation is a tooltip. Hover a view, the chart, the state box, a pad button, or a slider to read what it does.
@@ -87,6 +100,7 @@ teleop.yaml:
 | camera_topic, preview_width, preview_quality | `/camera/color` on the latest driver, `/camera` on older cars; live view size and jpeg quality, shared by both views |
 | depth_topic | `/camera/depth` on a D435i. Empty on a car whose camera is color only, which drops the depth pane rather than subscribing to a topic nobody publishes |
 | depth_max_m | far end of the depth ramp, metres; anything past it clamps to the dark end instead of dropping out |
+| detections_topic | `vision_msgs/Detection2DArray` for the Detections switch, `/edgetpu/inference` on this driver. Empty on a car with no detector, which disables the switch |
 
 Save rewrites the numbers in place, so the comments in the yaml survive.
 

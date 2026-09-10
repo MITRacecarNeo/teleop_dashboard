@@ -22,5 +22,11 @@ depth_max_m: 4.0      # far end of the depth ramp, metres. Anything past this
                       # clamps to the dark end instead of dropping out. 4 m
                       # suits a lab floor; raise it for a corridor.
 
+# vision_msgs/Detection2DArray for the Detections toggle on the colour view.
+# edgetpu_node publishes /edgetpu/inference; a car that remaps the detector
+# elsewhere points this at it. Leave empty on a car with no detector: the
+# toggle then reports itself unavailable instead of waiting forever.
+detections_topic: /edgetpu/inference
+
 preview_width: 320    # live view width sent to the browser, pixels
 preview_quality: 45   # live view jpeg quality 1..100

@@ -6,6 +6,10 @@ The camera card carries both D435i streams: the color frame over a colorized
 depth frame. Depth is optional; a car whose camera has no depth stream leaves
 depth_topic empty and the card shows the color frame alone.
 
+A Detections toggle overlays the object detector's boxes on the color frame.
+Boxes are published in source-image pixels and leave here normalized, so the
+browser scales them to whatever size it is drawing the preview at.
+
 Same pattern as the other lab dashboards (stdlib HTTP + rclpy) on port
 8081. The browser holds a command of two axes, forward/back and left/right,
 each -1, 0, or +1, from whichever buttons or keys are down at once, and
@@ -48,6 +52,12 @@ from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image, LaserScan
+try:
+    from vision_msgs.msg import Detection2DArray
+except ImportError:
+    # A car without vision_msgs still gets every other view; the Detections
+    # toggle reports itself unavailable rather than taking the page down.
+    Detection2DArray = None
 import yaml
 
 PORT = 8081
@@ -64,6 +74,23 @@ HIST_POINTS = 300
 
 TUNE_KEYS = ('speed', 'angle')
 
+# Raw scan angle that points at the car's nose, in degrees.
+#
+# The RACECAR Neo mounts its RPLIDAR facing aft over 360 degrees at 1080
+# points, so the nose sits at the raw +/-180 edge of the sweep rather than at
+# 0. Measured on hardware: an object in front reports at raw 180, and one off
+# the car's right at raw +90.
+#
+#     student_deg = LIDAR_MOUNT_YAW_DEG - raw_deg
+#
+# The view read 180 degrees out before this constant existed, which is the
+# v0.8.0 known limitation: the plain negation below it assumed the neoracer's
+# forward-facing 270 degree mount. Set this to 0.0 for such a lidar. Nothing
+# here assumes a sweep width; the angle comes from the message's own
+# angle_min and angle_increment. Same convention and constant as
+# wallfollow.py, which steers on it.
+LIDAR_MOUNT_YAW_DEG = 180.0
+
 # Depth colouring. Near reads bright and far reads dark, on the perceptually
 # uniform inferno ramp: a single ordered scale, so a step in colour is a step
 # in distance, and it survives being read by a colour blind student. The ramp
@@ -73,12 +100,17 @@ DEPTH_FLOOR = 24
 DEPTH_NEAR_M = 0.15     # below the D435i minimum range; nothing valid is nearer
 NO_RETURN_BGR = (0, 0, 0)
 
+# Detections older than this are dropped rather than left frozen on the
+# frame. The overlay is only honest if a stale box disappears.
+DET_TIMEOUT_S = 1.5
+
 _lock = threading.Lock()
 _params: dict = {}
 _state: dict = {'fwd': 0, 'turn': 0, 'held': False, 'timed_out': False,
                 'speed_cmd': 0.0, 'steer': 0.0, 'enc_speed': 0.0,
                 'scan': [], 'res': [0, 0], 'cam_fps': 0.0,
                 'depth_res': [0, 0], 'depth_fps': 0.0,
+                'dets': [], 'det_fps': 0.0, 'det_ok': False,
                 'hist': [], 'marks': []}
 _preview = b''
 _depth_preview = b''
@@ -183,6 +215,7 @@ class TeleopNode(Node):
         with _lock:
             cam_topic = _params['camera_topic']
             depth_topic = _params.get('depth_topic') or ''
+            det_topic = _params.get('detections_topic') or ''
         self._pub = self.create_publisher(AckermannDriveStamped, '/drive', 1)
         self.create_subscription(Image, cam_topic, self._image_cb, qos_profile_sensor_data)
         # Depth is a separate stream on the same camera, and only the D435i
@@ -190,6 +223,12 @@ class TeleopNode(Node):
         # subscribing to nothing would sit at 0 fps and read as a fault.
         if depth_topic:
             self.create_subscription(Image, depth_topic, self._depth_cb, qos_profile_sensor_data)
+        # Detections are a bonus view, not a dependency: a car with no
+        # detector, or no vision_msgs, simply never enables the toggle.
+        self._det_available = bool(det_topic) and Detection2DArray is not None
+        if self._det_available:
+            self.create_subscription(
+                Detection2DArray, det_topic, self._det_cb, qos_profile_sensor_data)
         self.create_subscription(LaserScan, '/scan', self._scan_cb, qos_profile_sensor_data)
         self.create_subscription(Odometry, '/odom', self._odom_cb, qos_profile_sensor_data)
         # /drive at a fixed rate whether or not the browser is talking, so
@@ -204,14 +243,21 @@ class TeleopNode(Node):
         self._last_depth_preview = 0.0
         self._frame_stamps = []
         self._depth_stamps = []
+        self._det_stamps = []
+        self._last_det = 0.0
 
     def _odom_cb(self, msg):
         self._enc = msg.twist.twist.linear.x
 
+    @staticmethod
+    def _student_deg(msg, i):
+        """Student angle of ray `i`: 0 the nose, positive the car's right."""
+        raw = math.degrees(msg.angle_min + i * msg.angle_increment)
+        return (LIDAR_MOUNT_YAW_DEG - raw + 180.0) % 360.0 - 180.0
+
     def _scan_cb(self, msg):
-        # 0 = nose, positive = right (student convention); every third ray
-        # is plenty for a 420 px view.
-        scan = [[round(-math.degrees(msg.angle_min + i * msg.angle_increment), 1),
+        # Every third ray is plenty for a 420 px view.
+        scan = [[round(self._student_deg(msg, i), 1),
                  round(msg.ranges[i], 3)]
                 for i in range(0, len(msg.ranges), 3)
                 if msg.range_min < msg.ranges[i] < msg.range_max]
@@ -288,8 +334,45 @@ class TeleopNode(Node):
                 [cv2.IMWRITE_JPEG_QUALITY, int(p['preview_quality'])])[1].tobytes()
             _state['depth_res'] = [w, h]
 
+    def _det_cb(self, msg):
+        """Normalize the detector's boxes against the colour frame.
+
+        vision_msgs carries a centre and a size in source-image pixels. The
+        browser draws the preview at whatever width fits its column, so the
+        boxes leave here as fractions of the frame and are scaled there.
+        """
+        now = time.monotonic()
+        self._det_stamps = self._tick_fps(self._det_stamps, now, 'det_fps')
+        self._last_det = now
+        with _lock:
+            w, h = _state['res']
+        if not w or not h:
+            return
+        dets = []
+        for d in msg.detections:
+            cx, cy = d.bbox.center.position.x, d.bbox.center.position.y
+            bw, bh = d.bbox.size_x, d.bbox.size_y
+            label, score = '', 0.0
+            if d.results:
+                label = d.results[0].hypothesis.class_id
+                score = round(float(d.results[0].hypothesis.score), 3)
+            dets.append([round((cx - bw / 2) / w, 4), round((cy - bh / 2) / h, 4),
+                         round(bw / w, 4), round(bh / h, 4), label, score])
+        with _lock:
+            _state['dets'] = dets
+
+    def _expire_detections(self, now):
+        """Clear the overlay when the detector stops publishing."""
+        fresh = self._det_available and (now - self._last_det) < DET_TIMEOUT_S
+        with _lock:
+            _state['det_ok'] = fresh
+            if not fresh:
+                _state['dets'] = []
+                _state['det_fps'] = 0.0
+
     def _actuate(self, now=None):
         now = time.monotonic() if now is None else now
+        self._expire_detections(now)
         with _lock:
             p = dict(_params)
             fwd, turn, stamp = _cmd['fwd'], _cmd['turn'], _cmd['stamp']
