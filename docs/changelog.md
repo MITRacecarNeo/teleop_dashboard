@@ -7,6 +7,12 @@ carrying `0.8.1` is the one that release of the driver was tested against.
 `setup_dashboards.sh` reads `VERSION` and reports a checkout that does not
 match the driver it is being installed by.
 
+## [0.8.2] - 2026-09-22
+
+### Changed
+
+- `VERSION` carries 0.8.2, tracking the driver release. No dashboard changes.
+
 ## [0.8.1] - 2026-09-10
 
 ### Added
