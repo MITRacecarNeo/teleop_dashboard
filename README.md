@@ -19,7 +19,7 @@ The service name is `racecar-webteleop`, not `racecar-teleop`: that name belongs
 
 ## Version
 
-`VERSION` carries `0.8.2`, tracking `racecar_neo_ros2_driver` rather than moving
+`VERSION` carries `0.8.3`, tracking `racecar_neo_ros2_driver` rather than moving
 on its own: this checkout is the one that release of the driver was tested
 against. `setup_dashboards.sh` reads it and reports a checkout that does not
 match the driver installing it, the same way `racecar setup realsense`
